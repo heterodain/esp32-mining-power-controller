@@ -15,22 +15,27 @@
 
 /* Settings -------------------------------- */
 
+// 休日にマイニングするかどうか(電気代が休日割引の場合にtrue)
+const boolean miningAtHoliday = true;
+// 夜間にマイニングするかどうか(電気代が夜間割引の場合にtrue)
+const boolean miningAtNight = true;
+// 夜間の時間帯
+const int nightTimeStart = 21;
+const int nightTimeEnd = 9;
+
 // OCプロファイルの名前
 const String HIGH_OC_PROFILE_NAME = "HIGH";
 const String LOW_OC_PROFILE_NAME = "LOW";
 
 // Power Limit制御の閾値とヒステリシス (Lux)
+// (照度に応じたPower Limit制御をしたくない場合は、高い数値を設定してください)
 const int PL_THRETHOLD = 2800;
 const int PL_HYSTERESIS = 300;
 
 // PC電源制御の閾値とヒステリシス (Lux)
+// (照度に応じたPC電源ON/OFF制御をしたくない場合は、高い数値を設定してください)
 const int PC_POWER_THRETHOLD = 1800;
 const int PC_POWER_HYSTERESIS = 300;
-
-// PC電源状態の入力ピン
-const int PC_POWER_STATUS_PIN = 18;
-// PC電源スイッチの出力ピン
-const int PC_POWER_SW_PIN = 19;
 
 // Ambientのチャネル接続設定
 const int AMBIENT_CHANNEL_ID = 99999;
@@ -39,12 +44,12 @@ const char AMBIENT_WRITE_KEY[] = "****************";
 // WIFIの接続設定
 const char WIFI_SSID[] = "************";
 const char WIFI_PASSWORD[] = "**********";
-const IPAddress WIFI_IP(192, 168, 116, 221);
-const IPAddress WIFI_GATEWAY(192, 168, 116, 254);
+const IPAddress WIFI_IP(192, 168, 0, 10);
+const IPAddress WIFI_GATEWAY(192, 168, 0, 254);
 const IPAddress WIFI_SUBNET(255, 255, 255, 0);
 const IPAddress WIFI_DNS(8, 8, 8, 8);
 
-// Hive APIの接続設定
+// Hive APIの接続設定 (https://hiveon.com/forum/t/hive-api-v2/4490)
 // [farm-id]: ファームのID
 // [worker-id]: ワーカーのID
 // [personal-token]: パーソナルトークン(アカウント設定から生成可能)
@@ -52,7 +57,15 @@ const char GET_OC_PROFILES_URL[] = "https://api2.hiveos.farm/api/v2/farms/[farm-
 const char SET_WORKER_OC_URL[] = "https://api2.hiveos.farm/api/v2/farms/[farm-id]/workers/[worker-id]";
 const char PERSONAL_TOKEN[] = "Bearer [personal-token]";
 
+// 休日判定API (https://s-proj.com/utils/holiday.html)
+const char GHECK_HOLIDAY_URL[] = "https://s-proj.com/utils/checkHoliday.php?date=%04d%02d%02d";
+
 /* ---------------------------------------- */
+
+// PC電源状態の入力ピン
+const int PC_POWER_STATUS_PIN = 18;
+// PC電源スイッチの出力ピン
+const int PC_POWER_SW_PIN = 19;
 
 // Hive OSのOCプロファイル情報
 struct OcProfile {
@@ -60,6 +73,7 @@ struct OcProfile {
   String name;
   int ambientColor;
 };
+OcProfile UNKNOWN_OC = { 0, "NONE", 0 };
 
 // WIFIクライアント
 WiFiClient client;
@@ -74,6 +88,13 @@ HTTPClient httpClient;
 OcProfile lowOcProfile;
 OcProfile highOcProfile;
 
+// 現在のOCプロファイル
+OcProfile* currentOcProfile = &UNKNOWN_OC;
+
+// 時刻と休日フラグ
+tm now;
+bool holiday;
+
 // 照度の3分間積算値
 float threeMinDataSummary = 0.0;
 int threeMinDataCount = 0;
@@ -81,9 +102,6 @@ int threeMinDataCount = 0;
 // 照度の15分間積算値
 float fifteenMinDataSummary = 0.0;
 int fifteenMinDataCount = 0;
-
-// 現在のOCプロファイル
-OcProfile currentOcProfile = { 0, "UNKNOWN", 0 };
 
 /**
  * 初期化処理
@@ -117,6 +135,9 @@ void setup() {
 
   Serial.println(" connected");
 
+  // 時刻同期(NTP)
+  configTime(9 * 3600L, 0, "ntp.nict.jp", "time.google.com", "ntp.jst.mfeed.ad.jp");
+
   // Ambient初期化
   ambient.begin(AMBIENT_CHANNEL_ID, AMBIENT_WRITE_KEY, &client);
 
@@ -138,6 +159,27 @@ void setup() {
  * 3秒毎のループ処理
  */
 void loop() {
+  // 現在時刻取得
+  int lastYear = now.tm_year;
+  int lastMonth = now.tm_mon;
+  int lastDay = now.tm_mday;
+  getLocalTime(&now);
+  if (now.tm_year != lastYear || now.tm_mon != lastMonth || now.tm_mday != lastDay) {
+    // 日付が変わったら、休日判定を行う
+    holiday = isHoliday(&now);
+    
+    Serial.print("Date: ");
+    Serial.print(now.tm_year + 1900);
+    Serial.print("/");
+    Serial.print(now.tm_mon + 1);
+    Serial.print("/");
+    Serial.print(now.tm_mday);
+    Serial.println(holiday ? " holiday" : " weekday");
+  }
+
+  // 夜間判定
+  bool nightTime = (now.tm_hour >= nightTimeStart || now.tm_hour <= nightTimeEnd);
+
   // 照度計測
   lightSensor.configure(BH1750::ONE_TIME_HIGH_RES_MODE);
   while (!lightSensor.measurementReady(true)) {
@@ -153,12 +195,16 @@ void loop() {
   Serial.print("current: lux=");
   Serial.print(lux);
   Serial.print(", pc_power=");
-  Serial.println(pcPowerStatus == HIGH ? "ON" : "OFF");
+  Serial.print(pcPowerStatus == HIGH ? "ON" : "OFF");
+  Serial.print(", holiday=");
+  Serial.print(holiday ? "true": "false");
+  Serial.print(", nightTime=");
+  Serial.println(nightTime ? "true": "false");
 
   // 60ループ毎(約3分毎)にAmbient送信
   if (threeMinDataCount >= 60) {
     float average = threeMinDataSummary / threeMinDataCount;
-    sendAmbient(average, pcPowerStatus);
+    sendAmbient(average, currentOcProfile, pcPowerStatus);
      
     fifteenMinDataSummary += average;
     fifteenMinDataCount++;
@@ -169,26 +215,32 @@ void loop() {
   
   // 300ループ毎(約15分毎)にPC電源制御とPower Limit制御
   if (fifteenMinDataCount >= 5) {
+    bool holidayMining = miningAtHoliday && holiday;
+    bool nightMining = miningAtNight && nightTime;
     float average = fifteenMinDataSummary / fifteenMinDataCount;
 
-    // 照度が(閾値-ヒステリシス)を下回っていたらPower Limit下げ
-    if (average < (PL_THRETHOLD - PL_HYSTERESIS) && lowOcProfile.name.compareTo(currentOcProfile.name) != 0) {
-      changeOcProfile(lowOcProfile);
-      
     // 照度が(閾値+ヒステリシス)を上回っていたらPower Limit上げ
-    } else if (average > (PL_THRETHOLD + PL_HYSTERESIS) && highOcProfile.name.compareTo(currentOcProfile.name) != 0) {
-      changeOcProfile(highOcProfile);
+    if (average > (PL_THRETHOLD + PL_HYSTERESIS) && highOcProfile.name.compareTo(currentOcProfile->name) != 0) {
+      changeOcProfile(&highOcProfile);
+
+    // 照度が(閾値-ヒステリシス)を下回っていたらPower Limit下げ
+    } else if (average < (PL_THRETHOLD - PL_HYSTERESIS) && lowOcProfile.name.compareTo(currentOcProfile->name) != 0) {
+      changeOcProfile(&lowOcProfile);
     }
 
-    // 照度が(閾値-ヒステリシス)を下回っていたらPC電源オフ
-    if (average < (PC_POWER_THRETHOLD - PC_POWER_HYSTERESIS) && pcPowerStatus == HIGH) {
-      Serial.println("PC power off");
-      pushPcPowerButton();
+    // 照度が(閾値+ヒステリシス)を上回っているか、休日/夜間マイニング有効ならPC電源オン
+    if ((average > (PC_POWER_THRETHOLD + PC_POWER_HYSTERESIS) || holidayMining || nightMining)) {
+      if (pcPowerStatus == LOW) {
+        Serial.println("PC power on");
+        pushPcPowerButton();
+      }
 
-    // 照度が(閾値+ヒステリシス)を上回っていたらPC電源オン
-    } else if (average > (PC_POWER_THRETHOLD + PC_POWER_HYSTERESIS) && pcPowerStatus == LOW) {
-      Serial.println("PC power on");
-      pushPcPowerButton();
+    // 照度が(閾値-ヒステリシス)を下回っていたらPC電源オフ
+    } else if (average < (PC_POWER_THRETHOLD - PC_POWER_HYSTERESIS)) {
+      if (pcPowerStatus == HIGH) {
+        Serial.println("PC power off");
+        pushPcPowerButton();
+      }
     }
       
     fifteenMinDataSummary = 0.0;
@@ -199,18 +251,44 @@ void loop() {
 }
 
 /**
+ * 休日判定
+ */
+bool isHoliday(tm* timeInfo) {
+  char url[sizeof(GHECK_HOLIDAY_URL)];
+  sprintf(url, GHECK_HOLIDAY_URL, timeInfo->tm_year + 1900, timeInfo->tm_mon + 1, timeInfo->tm_mday);
+  
+  Serial.print("request: [GET] ");
+  Serial.println(url);
+
+  bool result = false;
+
+  httpClient.begin(url);
+  int resCode = httpClient.GET();
+  if (resCode == HTTP_CODE_OK) {
+    String resData = httpClient.getString();
+    result = resData.compareTo("holiday") == 0;
+  } else {
+    Serial.print("get holiday error: ");
+    Serial.println(resCode);
+  }
+  httpClient.end();
+
+  return result;
+}
+
+/**
  * Ambientへのデータ送信
  */
-void sendAmbient(double lux, int pcPowerStatus) {
+void sendAmbient(double lux, OcProfile* oc, int pcPowerStatus) {
   Serial.print("send ambient: lux=");
   Serial.print(lux);
   Serial.print(", oc=");
-  Serial.print(currentOcProfile.name);
+  Serial.print(oc->name);
   Serial.print(", pc_power=");
   Serial.println(pcPowerStatus == HIGH ? "ON" : "OFF");
 
   ambient.set(1, lux);
-  ambient.set(2, currentOcProfile.ambientColor);
+  ambient.set(2, currentOcProfile->ambientColor);
   ambient.set(3, pcPowerStatus == HIGH ? 1 : 0);
   ambient.send();
 }
@@ -224,14 +302,13 @@ void getOcProfiles() {
 
   httpClient.begin(GET_OC_PROFILES_URL);
   httpClient.addHeader("Authorization", PERSONAL_TOKEN);
-
   int resCode = httpClient.GET();
   if (resCode == HTTP_CODE_OK) {
     String resData = httpClient.getString();
     Serial.print("response: ");
     Serial.println(resData);
 
-    DynamicJsonDocument jsonDoc(2048);
+    DynamicJsonDocument jsonDoc(4096);
     deserializeJson(jsonDoc, resData);
     JsonArray json = jsonDoc["data"].as<JsonArray>();
     for (JsonObject data : json) {
@@ -252,24 +329,22 @@ void getOcProfiles() {
 /**
  * OCプロファイルを変更
  */
-void changeOcProfile(OcProfile ocProfile) {
+void changeOcProfile(OcProfile* ocProfile) {
   Serial.print("request: [PATCH] ");
   Serial.println(GET_OC_PROFILES_URL);
+
+  char json[50];
+  sprintf(json, "{\"oc_id\":%d,\"oc_apply_mode\":\"replace\"}", ocProfile->id);
+  Serial.print("payload: ");
+  Serial.println(json);
 
   httpClient.begin(SET_WORKER_OC_URL);
   httpClient.addHeader("Content-Type", "application/json");
   httpClient.addHeader("Authorization", PERSONAL_TOKEN);
-
-  String json = String("{\"oc_id\":") + ocProfile.id + ",\"oc_apply_mode\":\"replace\"}";
-  Serial.print("payload: ");
-  Serial.println(json);
-
-  char jsonArray[json.length() + 1];
-  json.toCharArray(jsonArray, sizeof(jsonArray));
-  int resCode = httpClient.PATCH((uint8_t*) jsonArray, strlen(jsonArray));
+  int resCode = httpClient.PATCH((uint8_t*) json, strlen(json));
   if (resCode == HTTP_CODE_OK) {
     Serial.print("change oc profile to ");
-    Serial.println(ocProfile.name);
+    Serial.println(ocProfile->name);
   } else {
     Serial.print("changeOcprofile error: ");
     Serial.println(resCode);
@@ -280,7 +355,7 @@ void changeOcProfile(OcProfile ocProfile) {
 }
 
 /**
- * PC電源制御
+ * PC電源ON/OFF
  */
  void pushPcPowerButton() {
     // 0.3秒間電源スイッチを押す
@@ -288,3 +363,4 @@ void changeOcProfile(OcProfile ocProfile) {
     delay(300);
     digitalWrite(PC_POWER_SW_PIN, LOW);
  }
+ 
