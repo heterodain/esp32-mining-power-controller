@@ -28,12 +28,12 @@ const String HIGH_OC_PROFILE_NAME = "HIGH";
 const String LOW_OC_PROFILE_NAME = "LOW";
 
 // Power Limit制御の閾値とヒステリシス (Lux)
-// (照度に応じたPower Limit制御をしたくない場合は、高い数値を設定してください)
+// (照度に応じたPower Limit制御をしたくない場合は、ヒステリシスに高い数値(99999など)を設定してください)
 const int PL_THRETHOLD = 2800;
 const int PL_HYSTERESIS = 300;
 
 // PC電源制御の閾値とヒステリシス (Lux)
-// (照度に応じたPC電源ON/OFF制御をしたくない場合は、高い数値を設定してください)
+// (照度に応じたPC電源ON/OFF制御をしたくない場合は、ヒステリシスに値い数値(99999など)を設定してください)
 const int PC_POWER_THRETHOLD = 1800;
 const int PC_POWER_HYSTERESIS = 300;
 
