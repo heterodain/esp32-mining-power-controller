@@ -254,7 +254,7 @@ void loop() {
  * 休日判定
  */
 bool isHoliday(tm* timeInfo) {
-  char url[sizeof(GHECK_HOLIDAY_URL)];
+  char url[128];
   sprintf(url, GHECK_HOLIDAY_URL, timeInfo->tm_year + 1900, timeInfo->tm_mon + 1, timeInfo->tm_mday);
   
   Serial.print("request: [GET] ");
